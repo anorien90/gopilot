@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from .ollama_client import OllamaClient
+
+if TYPE_CHECKING:
+    from .git_context import GitContext
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +19,31 @@ logger = logging.getLogger(__name__)
 class LSPHandlers:
     """Handlers for LSP requests using Ollama."""
 
-    def __init__(self, ollama_client: OllamaClient):
+    # Maximum number of project files to include in context (prevents overwhelming the model)
+    MAX_PROJECT_FILES = 200
+
+    def __init__(
+        self,
+        ollama_client: OllamaClient,
+        git_context: Optional["GitContext"] = None,
+        context_lines: int = 50,
+    ):
         """
         Initialize LSP handlers.
 
         Args:
             ollama_client: Configured Ollama client instance
+            git_context: Optional git context for project scope
+            context_lines: Number of lines around cursor for local scope (default: 50)
         """
         self.ollama = ollama_client
+        self.git_context = git_context
+        self.context_lines = context_lines
         self._document_store: dict[str, str] = {}
-        logger.info("LSP handlers initialized")
+        logger.info(
+            f"LSP handlers initialized (context_lines={context_lines}, "
+            f"git_context={'enabled' if git_context else 'disabled'})"
+        )
 
     def store_document(self, uri: str, text: str) -> None:
         """
@@ -37,6 +55,17 @@ class LSPHandlers:
         """
         self._document_store[uri] = text
         logger.debug(f"Stored document: {uri} ({len(text)} chars)")
+
+    def remove_document(self, uri: str) -> None:
+        """
+        Remove document from storage (when tab closes).
+
+        Args:
+            uri: Document URI
+        """
+        if uri in self._document_store:
+            del self._document_store[uri]
+            logger.debug(f"Removed document: {uri}")
 
     def get_document(self, uri: str) -> Optional[str]:
         """
@@ -93,6 +122,156 @@ class LSPHandlers:
                 return lang
         return "text"
 
+    def _extract_current_line_prefix(self, line: str, char_pos: int) -> str:
+        """
+        Extract text on current line up to cursor position.
+
+        Args:
+            line: The current line text
+            char_pos: Character position (cursor)
+
+        Returns:
+            Text from line start to cursor
+        """
+        if char_pos < 0:
+            return ""
+        return line[:char_pos]
+
+    def _build_local_scope(
+        self, lines: list[str], line_num: int, char_num: int
+    ) -> tuple[str, str, str]:
+        """
+        Build local scope context around cursor.
+
+        Args:
+            lines: All document lines
+            line_num: Current line number (0-indexed)
+            char_num: Current character position
+
+        Returns:
+            Tuple of (code_before, code_after, cursor_prefix)
+        """
+        # Calculate range
+        start_line = max(0, line_num - self.context_lines)
+        end_line = min(len(lines), line_num + self.context_lines + 1)
+
+        # Build code before cursor (within local scope)
+        code_before_lines = lines[start_line:line_num]
+        if line_num < len(lines):
+            cursor_prefix = lines[line_num][:char_num]
+            code_before_lines.append(cursor_prefix)
+        else:
+            cursor_prefix = ""
+
+        # Build code after cursor (within local scope)
+        code_after_lines = []
+        if line_num < len(lines):
+            code_after_lines.append(lines[line_num][char_num:])
+        code_after_lines.extend(lines[line_num + 1 : end_line])
+
+        code_before = "\n".join(code_before_lines)
+        code_after = "\n".join(code_after_lines)
+
+        return code_before, code_after, cursor_prefix
+
+    def _extract_file_summary(self, text: str, language: str) -> str:
+        """
+        Extract key structural elements from a file for secondary context.
+
+        Args:
+            text: Document content
+            language: Programming language
+
+        Returns:
+            Summary string with imports and signatures
+        """
+        lines = text.split("\n")
+        summary_lines = []
+
+        # Language-specific patterns
+        if language == "python":
+            # Combine iterations for efficiency - collect both imports and definitions
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # Imports (typically in first 100 lines)
+                if i < 100 and stripped.startswith(("import ", "from ")):
+                    summary_lines.append(stripped)
+                # Function and class definitions (throughout file)
+                elif stripped.startswith(("def ", "class ", "async def ")):
+                    # Extract just the signature
+                    if ":" in stripped:
+                        sig = stripped.split(":")[0] + ":"
+                        summary_lines.append(sig)
+
+        elif language in ("javascript", "typescript"):
+            for line in lines[:100]:
+                stripped = line.strip()
+                if stripped.startswith(("import ", "export ", "const ", "let ", "var ")):
+                    summary_lines.append(stripped[:80])  # Limit length
+
+        # Generic fallback - just grab first few non-empty lines
+        if not summary_lines:
+            for line in lines[:20]:
+                if line.strip():
+                    summary_lines.append(line.strip()[:80])
+                if len(summary_lines) >= 10:
+                    break
+
+        return "\n".join(summary_lines[:30])  # Max 30 lines
+
+    def _build_secondary_context(self, current_uri: str) -> str:
+        """
+        Build secondary context from other open documents.
+
+        Args:
+            current_uri: URI of the active document (to exclude)
+
+        Returns:
+            Formatted secondary context string
+        """
+        if len(self._document_store) <= 1:
+            return ""
+
+        context_parts = []
+        context_parts.append("=== Open Tabs (Secondary Context) ===")
+
+        for uri, text in self._document_store.items():
+            if uri == current_uri:
+                continue
+
+            # Extract file path from URI
+            file_path = uri.replace("file://", "")
+            language = self._get_language_from_uri(uri)
+
+            # Get summary
+            summary = self._extract_file_summary(text, language)
+
+            context_parts.append(f"\n--- {file_path} ({language}) ---")
+            if summary:
+                context_parts.append(summary)
+
+        return "\n".join(context_parts) if len(context_parts) > 1 else ""
+
+    def _build_project_scope(self) -> str:
+        """
+        Build project scope context from git repository.
+
+        Returns:
+            Formatted project file listing
+        """
+        if not self.git_context:
+            return ""
+
+        files = self.git_context.list_project_files()
+        if not files:
+            return ""
+
+        # Limit to reasonable number to avoid overwhelming the model with too many files
+        if len(files) > self.MAX_PROJECT_FILES:
+            files = files[:self.MAX_PROJECT_FILES]
+
+        return "=== Project Files ===\n" + "\n".join(files)
+
     def handle_completion(
         self,
         uri: str,
@@ -100,7 +279,13 @@ class LSPHandlers:
         context: Optional[dict] = None,
     ) -> list[dict[str, Any]]:
         """
-        Handle textDocument/completion request.
+        Handle textDocument/completion request with layered context.
+
+        Context priority (highest to lowest):
+        1. Local scope: +/- context_lines around cursor
+        2. Primary context: Current file structure
+        3. Secondary context: Other open tabs
+        4. Project scope: All project files
 
         Args:
             uri: Document URI
@@ -119,34 +304,37 @@ class LSPHandlers:
         line_num = position.get("line", 0)
         char_num = position.get("character", 0)
 
-        # Get code before and after cursor
-        code_before_lines = lines[:line_num]
-        if line_num < len(lines):
-            code_before_lines.append(lines[line_num][:char_num])
+        # Build local scope (highest priority)
+        code_before, code_after, cursor_prefix = self._build_local_scope(
+            lines, line_num, char_num
+        )
 
-        code_after_lines = []
-        if line_num < len(lines):
-            code_after_lines.append(lines[line_num][char_num:])
-        code_after_lines.extend(lines[line_num + 1 :])
+        # Build secondary context (other open tabs)
+        secondary_context = self._build_secondary_context(uri)
 
-        code_before = "\n".join(code_before_lines)
-        code_after = "\n".join(code_after_lines)
-
-        # Limit context window
-        code_before = code_before[-2000:] if len(code_before) > 2000 else code_before
-        code_after = code_after[:500] if len(code_after) > 500 else code_after
+        # Build project scope (file listing)
+        project_context = self._build_project_scope()
 
         language = self._get_language_from_uri(uri)
 
         logger.debug(
             f"Completion request at {uri}:{line_num}:{char_num} ({language})"
         )
+        logger.debug(
+            f"Context: local={len(code_before)+len(code_after)} chars, "
+            f"secondary={len(secondary_context)} chars, "
+            f"project={len(project_context)} chars, "
+            f"cursor_prefix='{cursor_prefix}'"
+        )
 
-        # Get completion from Ollama
+        # Get completion from Ollama with layered context
         completion = self.ollama.complete_code(
             code_before=code_before,
             code_after=code_after,
             language=language,
+            cursor_prefix=cursor_prefix,
+            secondary_context=secondary_context,
+            project_context=project_context,
         )
 
         if not completion:
