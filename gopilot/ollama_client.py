@@ -127,30 +127,71 @@ class OllamaClient:
         code_after: str = "",
         language: str = "python",
         model: Optional[str] = None,
+        cursor_prefix: str = "",
+        secondary_context: str = "",
+        project_context: str = "",
     ) -> Optional[str]:
         """
-        Generate code completion.
+        Generate code completion with layered context.
 
         Args:
-            code_before: Code before cursor
-            code_after: Code after cursor
+            code_before: Code before cursor (local scope)
+            code_after: Code after cursor (local scope)
             language: Programming language
             model: Model to use
+            cursor_prefix: Exact text at cursor position for precise completion
+            secondary_context: Context from other open tabs
+            project_context: Project file listing
 
         Returns:
             Code completion or None on error
         """
-        system_prompt = f"""You are a code completion assistant. Complete the code naturally.
-Language: {language}
-Rules:
-- Only output the completion, no explanations
-- Match the coding style
-- Keep it concise and relevant"""
+        system_prompt = f"""You are a precise code completion assistant for {language}.
 
-        prompt = f"Complete this code:\n```{language}\n{code_before}"
+CRITICAL RULES:
+1. Complete ONLY from the exact cursor position - do NOT repeat any code that already exists
+2. The cursor is at the end of: "{cursor_prefix}"
+3. Your completion should continue naturally from that exact point
+4. Do NOT include explanations, comments, or markdown - only the completion code
+5. Match the existing code style and indentation
+6. Keep completions focused and concise
+
+Context priority:
+- PRIMARY: Local code around cursor (most important)
+- SECONDARY: Other open files (for imports/references)
+- TERTIARY: Project structure (for awareness)
+
+Only output the exact completion text that should be inserted at the cursor."""
+
+        # Build the prompt with layered context
+        prompt_parts = []
+
+        # Add secondary context if available
+        if secondary_context:
+            prompt_parts.append(secondary_context)
+
+        # Add project context if available (less priority)
+        if project_context:
+            prompt_parts.append(f"\n{project_context}")
+
+        # Add the main completion request (highest priority)
+        prompt_parts.append(f"\n=== Current File (Primary Context) ===")
+        prompt_parts.append(f"Language: {language}")
+        prompt_parts.append(f"\nCode before cursor:\n```{language}\n{code_before}")
+
         if code_after:
-            prompt += f"\n[CURSOR]\n{code_after}"
-        prompt += "\n```\nCompletion:"
+            prompt_parts.append(f"\n[CURSOR HERE]\n{code_after}")
+        else:
+            prompt_parts.append("\n[CURSOR HERE]")
+
+        prompt_parts.append("```")
+
+        # Truncate cursor_prefix for display to avoid prompt issues with very long lines
+        display_prefix = cursor_prefix[:100] if len(cursor_prefix) > 100 else cursor_prefix
+        prompt_parts.append(f"\nCursor position text: '{display_prefix}'")
+        prompt_parts.append("\nProvide ONLY the completion code (no explanations):")
+
+        prompt = "\n".join(prompt_parts)
 
         return self.generate(prompt, model=model, system=system_prompt)
 

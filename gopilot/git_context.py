@@ -214,6 +214,22 @@ class GitContext:
         return [line.strip() for line in output.splitlines() if line.strip()]
 
     # ------------------------------------------------------------------
+    # File listing
+    # ------------------------------------------------------------------
+
+    def list_project_files(self) -> list[str]:
+        """
+        List all tracked files in the repository.
+
+        Returns:
+            Sorted list of file paths relative to repository root.
+        """
+        output = self._run_git("ls-files")
+        if not output:
+            return []
+        return sorted(line.strip() for line in output.splitlines() if line.strip())
+
+    # ------------------------------------------------------------------
     # File content helpers
     # ------------------------------------------------------------------
 

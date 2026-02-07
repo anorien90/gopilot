@@ -44,6 +44,7 @@ class LSPServer:
         ollama_port: int = 11434,
         model: str = "codellama",
         repo_path: Optional[str] = None,
+        context_lines: int = 50,
     ):
         """
         Initialize LSP server.
@@ -53,24 +54,34 @@ class LSPServer:
             ollama_port: Ollama server port
             model: Default Ollama model
             repo_path: Path to the git repository (enables agent features)
+            context_lines: Number of lines around cursor for local scope
         """
         self.ollama_client = OllamaClient(
             host=ollama_host,
             port=ollama_port,
             model=model,
         )
-        self.handlers = LSPHandlers(self.ollama_client)
-        self._initialized = False
-        self._shutdown_requested = False
 
         # Git-aware copilot agent
         self.git_context = GitContext(repo_path)
         self.agent: Optional[CopilotAgent] = None
-        if self.git_context.is_git_repo():
+        git_enabled = self.git_context.is_git_repo()
+
+        # Initialize handlers with git context for project scope
+        self.handlers = LSPHandlers(
+            self.ollama_client,
+            git_context=self.git_context if git_enabled else None,
+            context_lines=context_lines,
+        )
+
+        if git_enabled:
             self.agent = CopilotAgent(self.ollama_client, self.git_context)
             logger.info("Copilot agent enabled (git repository detected)")
         else:
             logger.info("Copilot agent disabled (not a git repository)")
+
+        self._initialized = False
+        self._shutdown_requested = False
 
         self._capabilities = {
             "textDocumentSync": {
@@ -155,7 +166,16 @@ class LSPServer:
         if root_uri:
             repo_path = root_uri.removeprefix("file://")
             self.git_context = GitContext(repo_path)
-            if self.git_context.is_git_repo():
+            git_enabled = self.git_context.is_git_repo()
+
+            # Reinitialize handlers with updated git context
+            self.handlers = LSPHandlers(
+                self.ollama_client,
+                git_context=self.git_context if git_enabled else None,
+                context_lines=self.handlers.context_lines,
+            )
+
+            if git_enabled:
                 self.agent = CopilotAgent(self.ollama_client, self.git_context)
                 logger.info(f"Copilot agent enabled for: {repo_path}")
 
@@ -243,6 +263,8 @@ class LSPServer:
         """Handle textDocument/didClose notification."""
         text_document = params.get("textDocument", {})
         uri = text_document.get("uri", "")
+        # Remove from document store when tab closes
+        self.handlers.remove_document(uri)
         logger.debug(f"Document closed: {uri}")
 
     def _handle_agent_request(self, params: dict) -> dict:
@@ -645,6 +667,12 @@ def main() -> None:
         default=None,
         help="Path to git repository (default: current directory)",
     )
+    parser.add_argument(
+        "--context-lines",
+        type=int,
+        default=50,
+        help="Number of lines around cursor for local scope (default: 50)",
+    )
 
     args = parser.parse_args()
 
@@ -662,6 +690,7 @@ def main() -> None:
         ollama_port=args.ollama_port,
         model=args.model,
         repo_path=args.repo_path,
+        context_lines=args.context_lines,
     )
 
     # Start transport

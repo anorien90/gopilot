@@ -4,6 +4,11 @@ AI-powered Language Server Protocol (LSP) server for Neovim using local Ollama m
 
 ## Features
 
+- **Layered Context System** - Intelligent completion with prioritized context layers
+  - **Local Scope**: +/- N lines around cursor (highest priority)
+  - **Active File**: Current document structure and signatures  
+  - **Open Tabs**: Other documents in editor for cross-file awareness
+  - **Project Scope**: All tracked files via git for project-wide context
 - **Code Completion** - Context-aware code completions powered by AI
 - **Hover Documentation** - AI-generated explanations for code under cursor
 - **GitHub Copilot Agent** - Interactive agent mode with git branch awareness
@@ -129,6 +134,76 @@ gopilot \
 | `--log-file` | `/tmp/gopilot.log` | Log file path |
 | `--log-level` | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR |
 | `--repo-path` | `.` | Path to git repository (default: current directory) |
+| `--context-lines` | `50` | Number of lines around cursor for local scope |
+
+## Layered Context System
+
+gopilot uses an intelligent layered context system to provide precise code completions
+while maintaining awareness of your entire project structure. The context is prioritized
+from most to least relevant:
+
+### Context Layers (Priority Order)
+
+1. **Local Scope** (Highest Priority)
+   - Lines within +/- N of the cursor (configurable via `--context-lines`, default 50)
+   - Provides immediate surrounding code for precise completions
+   - Most important for understanding current function/class context
+
+2. **Primary Context** (Active File)
+   - Current line prefix up to cursor position (for exact completion matching)
+   - File structure: imports, function signatures, class definitions
+   - Ensures completions start from the exact cursor position
+
+3. **Secondary Context** (Open Tabs)
+   - Abbreviated summaries of other open files in your editor
+   - Includes imports and function/class signatures
+   - Enables cross-file awareness (e.g., importing from another open file)
+
+4. **Project Scope** (Background Context)
+   - List of all git-tracked files in the repository
+   - Provides overall project structure awareness
+   - Helps with understanding available modules and packages
+
+### Configuration
+
+Control the local scope window size:
+
+```bash
+# Use 30 lines before and after cursor (60 total)
+gopilot --context-lines 30
+
+# Use 100 lines for larger context
+gopilot --context-lines 100
+```
+
+From Neovim configuration:
+
+```lua
+require('gopilot').setup({
+  context_lines = 50,  -- Default: 50 lines around cursor
+})
+```
+
+### How It Works
+
+When you request a completion at a cursor position:
+
+1. **Local Scope Extraction**: The system extracts code within the configured line
+   range around your cursor
+2. **Cursor Prefix Detection**: Captures the exact text on the current line up to
+   the cursor position
+3. **Secondary Context Building**: Summarizes other open files (imports, signatures)
+4. **Project Scope Listing**: Gets all tracked files from git (if in a git repository)
+5. **Layered Prompt**: Sends all context layers to the AI model with clear priority
+6. **Precise Completion**: The model completes from the exact cursor position without
+   repeating existing code
+
+This approach ensures:
+- ✓ Fast, accurate completions focused on your current location
+- ✓ Awareness of other files you're working with
+- ✓ Understanding of overall project structure
+- ✓ No redundant code repetition
+- ✓ Exact insertion point matching
 
 ## Agent Mode (GitHub Copilot Agent)
 
