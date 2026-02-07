@@ -15,6 +15,7 @@ LABEL description="AI-powered LSP server for Neovim using Ollama"
 WORKDIR /app
 
 # Copy package files
+COPY README.md .
 COPY setup.py .
 COPY requirements.txt .
 COPY gopilot/ ./gopilot/

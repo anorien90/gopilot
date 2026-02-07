@@ -252,3 +252,8 @@ class CopilotAgent:
         except Exception as exc:
             logger.exception(f"Agent error for action={action}: {exc}")
             return {"error": str(exc)}
+
+
+if __name__ == "__main__"
+    agent = Agent(git=Git())
+    agent.handle_agent_request(action="query", params={"query": ""})
