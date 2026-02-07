@@ -1,11 +1,11 @@
 """
-gopilot LSP Server - Full-featured server with stdio/TCP modes
+gopilot LSP Server - Full-featured server with stdio/TCP/agent modes
 
 Usage:
     python -m gopilot.server [options]
 
 Options:
-    --mode        Server mode: stdio or tcp (default: stdio)
+    --mode        Server mode: stdio, tcp, or agent (default: stdio)
     --host        TCP host (default: 127.0.0.1)
     --port        TCP port (default: 2087)
     --ollama-host Ollama server host (default: localhost)
@@ -13,6 +13,7 @@ Options:
     --model       Ollama model to use (default: codellama)
     --log-file    Log file path (default: /tmp/gopilot.log)
     --log-level   Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+    --repo-path   Path to git repository (default: current directory)
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from typing import Any, Optional
 
 from .ollama_client import OllamaClient
 from .handlers import LSPHandlers
+from .git_context import GitContext
+from .agent import CopilotAgent
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -40,6 +43,7 @@ class LSPServer:
         ollama_host: str = "localhost",
         ollama_port: int = 11434,
         model: str = "codellama",
+        repo_path: Optional[str] = None,
     ):
         """
         Initialize LSP server.
@@ -48,6 +52,7 @@ class LSPServer:
             ollama_host: Ollama server hostname
             ollama_port: Ollama server port
             model: Default Ollama model
+            repo_path: Path to the git repository (enables agent features)
         """
         self.ollama_client = OllamaClient(
             host=ollama_host,
@@ -57,6 +62,16 @@ class LSPServer:
         self.handlers = LSPHandlers(self.ollama_client)
         self._initialized = False
         self._shutdown_requested = False
+
+        # Git-aware copilot agent
+        self.git_context = GitContext(repo_path)
+        self.agent: Optional[CopilotAgent] = None
+        if self.git_context.is_git_repo():
+            self.agent = CopilotAgent(self.ollama_client, self.git_context)
+            logger.info("Copilot agent enabled (git repository detected)")
+        else:
+            logger.info("Copilot agent disabled (not a git repository)")
+
         self._capabilities = {
             "textDocumentSync": {
                 "openClose": True,
@@ -114,6 +129,8 @@ class LSPServer:
             result = self._handle_completion(params)
         elif method == "textDocument/hover":
             result = self._handle_hover(params)
+        elif method == "gopilot/agent":
+            result = self._handle_agent_request(params)
         elif method == "$/cancelRequest":
             return None  # Ignore cancel requests
         else:
@@ -134,13 +151,36 @@ class LSPServer:
         root_uri = params.get("rootUri", params.get("rootPath", ""))
         logger.info(f"Root URI: {root_uri}")
 
-        return {
+        # Update git context repo path from the client root if available
+        if root_uri:
+            repo_path = root_uri.removeprefix("file://")
+            self.git_context = GitContext(repo_path)
+            if self.git_context.is_git_repo():
+                self.agent = CopilotAgent(self.ollama_client, self.git_context)
+                logger.info(f"Copilot agent enabled for: {repo_path}")
+
+        result = {
             "capabilities": self._capabilities,
             "serverInfo": {
                 "name": "gopilot",
                 "version": "0.1.0",
             },
         }
+
+        # Advertise agent capabilities
+        if self.agent:
+            result["serverInfo"]["agentCapabilities"] = {
+                "actions": [
+                    "query",
+                    "review",
+                    "commit_message",
+                    "explain_diff",
+                    "summarize_branch",
+                    "status",
+                ],
+            }
+
+        return result
 
     def _handle_initialized(self) -> None:
         """Handle initialized notification."""
@@ -204,6 +244,16 @@ class LSPServer:
         text_document = params.get("textDocument", {})
         uri = text_document.get("uri", "")
         logger.debug(f"Document closed: {uri}")
+
+    def _handle_agent_request(self, params: dict) -> dict:
+        """Handle gopilot/agent custom request."""
+        if not self.agent:
+            return {"error": "Agent not available (not a git repository)"}
+
+        action = params.get("action", "")
+        action_params = params.get("params", {})
+        logger.info(f"Agent request: action={action}")
+        return self.agent.handle_agent_request(action, action_params)
 
     def _handle_completion(self, params: dict) -> dict:
         """Handle textDocument/completion request."""
@@ -473,6 +523,74 @@ def setup_logging(log_file: str, log_level: str) -> None:
     root_logger.addHandler(file_handler)
 
 
+def _run_agent_cli(server: LSPServer) -> None:
+    """
+    Run an interactive CLI agent session.
+
+    This mode lets developers interact with the copilot agent directly
+    from the terminal, asking questions about branches, requesting
+    code reviews, or generating commit messages.
+    """
+    if not server.agent:
+        print("Error: not inside a git repository. Agent mode requires git.")
+        sys.exit(1)
+
+    branch = server.agent.git.get_current_branch() or "unknown"
+    print(f"gopilot agent · branch: {branch}")
+    print("Commands: /review, /commit, /diff <base> [target], /summary [branch], /status, /quit")
+    print("Or type a question.\n")
+
+    while True:
+        try:
+            query = input("gopilot> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nBye!")
+            break
+
+        if not query:
+            continue
+        if query in ("/quit", "/exit", "/q"):
+            print("Bye!")
+            break
+
+        if query == "/status":
+            status = server.agent.git.get_status_summary()
+            for key, val in status.items():
+                if isinstance(val, list):
+                    val = ", ".join(val) if val else "(none)"
+                print(f"  {key}: {val}")
+            continue
+
+        if query == "/review":
+            print("Reviewing changes …")
+            print(server.agent.review_changes() or "(no response)")
+            continue
+
+        if query == "/commit":
+            print("Generating commit message …")
+            print(server.agent.suggest_commit_message() or "(no response)")
+            continue
+
+        if query.startswith("/diff"):
+            parts = query.split()
+            base = parts[1] if len(parts) > 1 else "main"
+            target = parts[2] if len(parts) > 2 else None
+            print(f"Explaining diff {base}..{target or 'HEAD'} …")
+            print(server.agent.explain_diff(base, target) or "(no response)")
+            continue
+
+        if query.startswith("/summary"):
+            parts = query.split()
+            branch_arg = parts[1] if len(parts) > 1 else None
+            print("Summarizing branch …")
+            print(server.agent.summarize_branch(branch_arg) or "(no response)")
+            continue
+
+        # Free-form query
+        print("Thinking …")
+        print(server.agent.process_query(query) or "(no response)")
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -480,9 +598,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["stdio", "tcp"],
+        choices=["stdio", "tcp", "agent"],
         default="stdio",
-        help="Server mode (default: stdio)",
+        help="Server mode (default: stdio). 'agent' starts an interactive CLI agent.",
     )
     parser.add_argument(
         "--host",
@@ -522,6 +640,11 @@ def main() -> None:
         default="INFO",
         help="Log level (default: INFO)",
     )
+    parser.add_argument(
+        "--repo-path",
+        default=None,
+        help="Path to git repository (default: current directory)",
+    )
 
     args = parser.parse_args()
 
@@ -538,21 +661,25 @@ def main() -> None:
         ollama_host=args.ollama_host,
         ollama_port=args.ollama_port,
         model=args.model,
+        repo_path=args.repo_path,
     )
 
     # Start transport
-    if args.mode == "stdio":
+    if args.mode == "agent":
+        _run_agent_cli(server)
+    elif args.mode == "stdio":
         transport = StdioTransport(server)
     else:
         transport = TCPTransport(server, args.host, args.port)
 
-    try:
-        transport.start()
-    except KeyboardInterrupt:
-        logger.info("Server interrupted")
-    except Exception as e:
-        logger.exception(f"Server error: {e}")
-        sys.exit(1)
+    if args.mode != "agent":
+        try:
+            transport.start()
+        except KeyboardInterrupt:
+            logger.info("Server interrupted")
+        except Exception as e:
+            logger.exception(f"Server error: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
