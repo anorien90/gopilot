@@ -18,7 +18,7 @@ setup(
     name="gopilot",
     version="0.1.0",
     author="gopilot",
-    description="AI-powered LSP server for Neovim using Ollama",
+    description="AI-powered LSP server and GitHub Copilot agent for Neovim using Ollama",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/anorien90/gopilot",

@@ -6,6 +6,8 @@ AI-powered Language Server Protocol (LSP) server for Neovim using local Ollama m
 
 - **Code Completion** - Context-aware code completions powered by AI
 - **Hover Documentation** - AI-generated explanations for code under cursor
+- **GitHub Copilot Agent** - Interactive agent mode with git branch awareness
+- **Git Branch Interaction** - Review diffs, suggest commits, explain changes across branches
 - **Multi-model Support** - Works with codellama, deepseek-coder, qwen2.5-coder, and more
 - **Docker Integration** - Easy deployment with Docker and docker-compose
 - **Flexible Configuration** - CLI arguments and Neovim configuration options
@@ -100,6 +102,9 @@ gopilot --mode stdio --model codellama
 # TCP mode (for remote/Docker usage)
 gopilot --mode tcp --host 0.0.0.0 --port 2087
 
+# Agent mode (interactive copilot with git awareness)
+gopilot --mode agent --model codellama
+
 # Full options
 gopilot \
   --mode stdio \
@@ -107,14 +112,15 @@ gopilot \
   --ollama-port 11434 \
   --model codellama \
   --log-file /tmp/gopilot.log \
-  --log-level DEBUG
+  --log-level DEBUG \
+  --repo-path /path/to/repo
 ```
 
 #### Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mode` | `stdio` | Server mode: `stdio` or `tcp` |
+| `--mode` | `stdio` | Server mode: `stdio`, `tcp`, or `agent` |
 | `--host` | `127.0.0.1` | TCP host (tcp mode only) |
 | `--port` | `2087` | TCP port (tcp mode only) |
 | `--ollama-host` | `localhost` | Ollama server hostname |
@@ -122,6 +128,90 @@ gopilot \
 | `--model` | `codellama` | Ollama model to use |
 | `--log-file` | `/tmp/gopilot.log` | Log file path |
 | `--log-level` | `INFO` | Log level: DEBUG, INFO, WARNING, ERROR |
+| `--repo-path` | `.` | Path to git repository (default: current directory) |
+
+## Agent Mode (GitHub Copilot Agent)
+
+The `agent` mode turns gopilot into an interactive GitHub Copilot-style assistant
+that understands your local git repository — branches, diffs, commit history, and
+staged changes.
+
+### Quick Start
+
+```bash
+cd /path/to/your/repo
+gopilot --mode agent
+```
+
+### Agent Commands
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Show current branch, changed files, and recent commits |
+| `/review` | AI-powered code review of current changes |
+| `/commit` | Generate a commit message from staged/unstaged changes |
+| `/diff <base> [target]` | Explain the diff between two branches |
+| `/summary [branch]` | Summarize the work done on a branch |
+| `/quit` | Exit the agent |
+| *(any text)* | Ask a free-form question with repository context |
+
+### Example Session
+
+```
+$ gopilot --mode agent
+gopilot agent · branch: feature/add-auth
+Commands: /review, /commit, /diff <base> [target], /summary [branch], /status, /quit
+Or type a question.
+
+gopilot> /status
+  branch: feature/add-auth
+  branches: main, feature/add-auth
+  staged_files: auth.py, middleware.py
+  unstaged_files: (none)
+  recent_commits: abc1234 Add JWT middleware, def5678 Initial auth module
+
+gopilot> /review
+Reviewing changes …
+The changes look good overall. A few suggestions:
+1. Consider adding token expiration validation in middleware.py
+2. The JWT secret should be loaded from environment variables, not hardcoded
+
+gopilot> /commit
+Generating commit message …
+feat(auth): add JWT authentication middleware
+
+- Implement JWT token validation middleware
+- Add auth module with login/logout endpoints
+
+gopilot> /diff main
+Explaining diff main..HEAD …
+This branch adds authentication support to the application…
+
+gopilot> What files have I changed compared to main?
+Thinking …
+Compared to main, you have added two new files: auth.py and middleware.py…
+```
+
+### LSP Custom Method
+
+When running in `stdio` or `tcp` mode, the agent is also available via the
+custom LSP method `gopilot/agent`. This lets editor plugins invoke agent
+actions programmatically:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "gopilot/agent",
+  "params": {
+    "action": "review",
+    "params": { "base_branch": "main" }
+  }
+}
+```
+
+Supported actions: `query`, `review`, `commit_message`, `explain_diff`,
+`summarize_branch`, `status`.
 
 ## Docker
 
@@ -269,14 +359,27 @@ gopilot supports completions for:
 │                 │                       │   LSP Server    │
 └─────────────────┘                       └────────┬────────┘
                                                    │
-                                                   │ HTTP API
+                                          ┌────────┼────────┐
+                                          │        │        │
+                                     HTTP API   Git CLI  gopilot/agent
+                                          │        │     (custom method)
+                                          ▼        ▼
+                                   ┌───────────┐  ┌───────────┐
+                                   │  Ollama   │  │ Local Git │
+                                   │(localhost)│  │   Repo    │
+                                   └───────────┘  └───────────┘
+
+┌─────────────────┐                       ┌─────────────────┐
+│   Terminal /    │  Interactive CLI       │   CopilotAgent  │
+│   Editor Plugin │◄────────────────────► │   (agent mode)  │
+└─────────────────┘                       └────────┬────────┘
                                                    │
-                                          ┌────────▼────────┐
-                                          │                 │
-                                          │     Ollama      │
-                                          │   (localhost)   │
-                                          │                 │
-                                          └─────────────────┘
+                                          ┌────────┼────────┐
+                                          ▼                 ▼
+                                   ┌───────────┐     ┌───────────┐
+                                   │  Ollama   │     │ Local Git │
+                                   │(localhost)│     │   Repo    │
+                                   └───────────┘     └───────────┘
 ```
 
 ## Development
