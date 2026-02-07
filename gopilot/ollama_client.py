@@ -1,8 +1,7 @@
 """
-Ollama Client - Async HTTP client for localhost:11434
+Ollama Client - HTTP client for localhost:11434
 """
 
-import asyncio
 import json
 import logging
 from typing import Optional

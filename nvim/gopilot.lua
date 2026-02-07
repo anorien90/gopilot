@@ -276,10 +276,10 @@ function M.health()
 
   -- Check Python version
   local python_version = vim.fn.system("python3 --version 2>&1")
-  if python_version:match("Python 3%.1[0-9]") or python_version:match("Python 3%.[0-9]") then
+  if python_version:match("Python 3%.1[0-2]") then
     ok("Python 3.10+ found: " .. python_version:gsub("%s+$", ""))
   else
-    warn("Python 3.10+ recommended: " .. python_version:gsub("%s+$", ""))
+    warn("Python 3.10+ required: " .. python_version:gsub("%s+$", ""))
   end
 
   -- Check Ollama availability
