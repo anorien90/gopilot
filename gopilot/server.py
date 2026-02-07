@@ -153,9 +153,7 @@ class LSPServer:
 
         # Update git context repo path from the client root if available
         if root_uri:
-            repo_path = root_uri
-            if repo_path.startswith("file://"):
-                repo_path = repo_path[7:]
+            repo_path = root_uri.removeprefix("file://")
             self.git_context = GitContext(repo_path)
             if self.git_context.is_git_repo():
                 self.agent = CopilotAgent(self.ollama_client, self.git_context)
